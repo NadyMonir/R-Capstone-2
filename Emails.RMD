@@ -1,0 +1,512 @@
+---
+title: "Spam Emails"
+author: "Nady Monir"
+date: "10/27/2020"
+output:
+  pdf_document: default
+  html_document:
+    highlight: haddock
+    theme: paper
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyverse)
+library(caret)
+load("Emails.RData")
+```
+
+## Overview
+
+This is a summary of my analysis regarding spam emails for the dataset in the following link:
+
+<https://archive.ics.uci.edu/ml/datasets/Spambase> 
+
+The idea is to separate the Spam emails from the regular (Not Spam) emails, keeping in mind that  it is worse to classifying a regular as Spam and lose important information, than to classify a spam as regular email.
+After wrangling the data in the desired format, I have used the following machine learning algorithms:
+
+  + Generalized linear model (GLM)
+  + Naive Bayes
+  + Linear discriminant analysis (LDA)
+  + K Nearest Neighbours (KNN)
+  + Classification and regression tree (RPART)
+  + Random Forest (RF)
+  + Classification with a bagging (TREEBAG)
+  + An Ensemble of all the above
+  
+I separated the data into two sets, one for training and tuning, and the other for testing
+Let's go into it step by step
+
+## Analysis
+
+### Data Preparation
+
+The data was presented in the sources as two files, one for Names of the fields (columns) and the descriptions associated, the other is or the data itself
+
+and so, we will start with the names, we just selected the lines that contains the column names, 
+and for example, such a line will be read like this:
+```{r message=FALSE, warning=FALSE}
+dl <- tempfile()
+download.file(
+  "https://archive.ics.uci.edu/ml/machine-learning-databases/spambase/spambase.names", dl)
+
+read_lines(file = dl, skip_empty_rows = T)[34]
+```
+
+and then we removed the first character (\\n), and then split by (:) choosing only the first part,
+
+Here is the code for extracting the Names:
+
+```{r extracting_names, echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+dl <- tempfile()
+download.file(
+  "https://archive.ics.uci.edu/ml/machine-learning-databases/spambase/spambase.names", dl)
+
+lines<-read_lines(file = dl, skip_empty_rows = T)[34:90]
+lines<-sapply(lines,function(l){
+  x<-str_sub(l,start = 2L)[1]
+  str_split_fixed(x,":",2)[,1]
+})
+```
+
+after that all we need to do is to add the Spam classified as a field:
+```{r echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+lines<-unname(lines)
+names<-c( lines,"spam")
+```
+
+
+
+Now, for the data, the source is representing every record (row) as a line with the fields are separated by comma (,),
+and the Spam classifier is a binary (1 for Spam, and 0 for Not Spam)
+
+Here is the code for extracting the emails dataset, setting the column names, and changing the fields type as appropriate:
+
+```{r extracting_emails, echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+dl <- tempfile()
+download.file(
+  "https://archive.ics.uci.edu/ml/machine-learning-databases/spambase/spambase.data",
+  dl)
+emails<-read.delim2(dl,header = F, sep = ",", dec = ".") %>%
+  set_names(., nm = names) %>% mutate(spam=ifelse(spam==1,"Spam", "Not Spam")) %>%
+  mutate(spam=factor(spam, levels = c("Spam", "Not Spam"))) %>% 
+  mutate(capital_run_length_longest=as.double(capital_run_length_longest)) %>%
+  mutate(capital_run_length_total=as.double(capital_run_length_total)) %>%
+  as.tibble()
+```
+
+
+### Data Exploration
+
+  1. There is 57 different predictor + Spam (Classifier / Target) with the following names:
+```{r}
+names
+```
+  
+  this represents the frequency of some words and special characters, while the last three fields are for the Capital letters in the email body,
+  we can see that there is an predictor for the frequency of the word "george", this can lead the way to personalize the spam classification in the future
+  
+  2. There is `r nrow(emails)` instance / row in the dataset, with the following classification:
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+table(emails$spam)
+```
+  
+  3. Some of the fields can be good predictors, as there a clear difference between the distribution for Spam / not Spam emails
+```{r message=FALSE, warning=FALSE}
+emails %>% 
+  pivot_longer(names_to = "Attr", values_to="values", cols=-spam) %>%
+  filter(Attr %in% c("word_freq_000","word_freq_your",
+                     "capital_run_length_total","char_freq_!")) %>%
+  ggplot(aes(spam,values, fill=spam))+
+  geom_boxplot()+
+  facet_wrap(~Attr, scales = "free")+
+  theme(axis.text.x = element_blank())
+```
+  
+  I have just choose some of the predictors, but remember there are 57 predictors
+
+
+### Training and Testing sets
+
+Before we start trying some ML algorithms, we had to split the data into test and train datasets
+Here we choose the test dataset to be 20% of the original data
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+test_index<-createDataPartition(emails$spam, times = 1, p = 0.2, list = F)
+train_set<-emails[-test_index,]
+test_set<-emails[test_index,]
+```
+
+and then we reformat the training set into x & y, where y is the Spam classifier and x is a matrix contains the predictors:
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+x<-train_set %>% select(-spam) %>% as.matrix()
+y=train_set$spam
+```
+
+
+
+### Generalized linear model (GLM)
+
+we will start with glm, as we can see, it doesn't have any tuning parameters:
+
+```{r message=FALSE, warning=FALSE}
+modelLookup("glm")
+```
+
+
+Remembering that it is worse to classifying a regular as Spam and lose important information, than to classify a spam as regular email, will choose Specificity as the main metric instead of Accuracy, 
+
+we will create a small dataframe as a tracker of the performance of every algorithm we try
+Here is the code, the Confusion Matrix table and the performance (Specificity & Accuracy) of our model:
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+control <- trainControl(summaryFunction = twoClassSummary) 
+
+train_glm<-train(x,y, method="glm",  metric = "Spec", trControl=control )
+y_hat_glm<-predict(train_glm, newdata = test_set)
+confusionMatrix(y_hat_glm, test_set$spam)$table
+specificity_df<-data.frame(method="glm", 
+                           Spec=specificity(y_hat_glm, test_set$spam),
+                           Accuracy=as.double(confusionMatrix(y_hat_glm, 
+                                            test_set$spam)$overall["Accuracy"]))
+specificity_df
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(y_hat_glm, test_set$spam)$table
+specificity_df[1,]
+```
+
+Finally let's take a look at the 5 important fields used in this model:
+```{r message=FALSE, warning=FALSE}
+varImp(train_glm)$importance %>% 
+   as.data.frame() %>%
+   rownames_to_column() %>%
+   arrange(desc(Overall)) %>% slice(1:5)
+```
+
+
+
+### Naive Bayes
+
+
+For Naive Bayes model, it has three tuning parameters, we will use the default tuning in Caret::train method:
+
+```{r message=FALSE, warning=FALSE}
+modelLookup("naive_bayes")
+```
+
+So here is the simple code for training, predicting and tracking the performance:
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+train_naive_bayes<-train(x,y, method="naive_bayes",  metric = "Spec", trControl=control )
+y_hat_naive_bayes<-predict(train_naive_bayes, newdata = test_set)
+confusionMatrix(y_hat_naive_bayes, test_set$spam)$table
+specificity_df<-rbind(specificity_df,
+                      data.frame(method="naive_bayes", 
+                                 Spec=specificity(y_hat_naive_bayes, test_set$spam),
+                                                Accuracy=confusionMatrix(y_hat_naive_bayes,
+                                                      test_set$spam)$overall["Accuracy"]))
+specificity_df
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(y_hat_naive_bayes, test_set$spam)$table
+specificity_df[1:2,]
+```
+
+
+The Naive Bayes has very low performace in our case
+
+Let's take a look at the important fields used in this model:
+```{r message=FALSE, warning=FALSE}
+varImp(train_naive_bayes)$importance %>% 
+   as.data.frame() %>%
+   rownames_to_column() %>%
+   arrange(desc(Spam)) %>% slice(1:5)
+```
+
+### Linear discriminant analysis (LDA)
+
+For LDA model, There is no tuning parameters:
+
+```{r message=FALSE, warning=FALSE}
+modelLookup("lda")
+```
+
+Here is the simple code for training, predicting and tracking the performance:
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+train_lda<-train(x,y, method="lda", metric = "Spec", trControl=control )
+y_hat_lda<-predict(train_lda, newdata = test_set)
+confusionMatrix(y_hat_lda, test_set$spam)$table
+
+specificity_df<-rbind(specificity_df,
+                      data.frame(method="lda", 
+                                 Spec=specificity(y_hat_lda, test_set$spam),
+                                          Accuracy=as.double(confusionMatrix(y_hat_lda,
+                                                    test_set$spam)$overall["Accuracy"])))
+specificity_df
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(y_hat_lda, test_set$spam)$table
+specificity_df[1:3,]
+```
+
+Let's take a look at the important fields used in this model:
+```{r message=FALSE, warning=FALSE}
+varImp(train_lda)$importance %>% 
+   as.data.frame() %>%
+   rownames_to_column() %>%
+   arrange(desc(Spam)) %>% slice(1:5)
+```
+
+
+
+### K Nearest Neighbours (KNN)
+
+For KNN model, There is one tuning parameter, k, the number of neighbours taken into account to classify a point:
+
+```{r message=FALSE, warning=FALSE}
+modelLookup("knn")
+```
+
+We will try tuning with k from 2 to 20, and then plot the output and printing the optimum k
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+grid <- data.frame(k = seq(2, 20))
+
+train_knn<-train(x,y, method="knn", metric = "Spec", trControl=control , tuneGrid = grid)
+
+ggplot(train_knn, highlight = T)
+train_knn$bestTune
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(train_knn, highlight = T)
+as.integer(train_knn$bestTune)
+```
+
+and for the performance on the test set:
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+y_hat_knn<-predict(train_knn, newdata = test_set)
+confusionMatrix(y_hat_knn, test_set$spam)$table
+
+specificity_df<-rbind(specificity_df,
+                      data.frame(method="knn", 
+                                 Spec=specificity(y_hat_knn, test_set$spam),
+                                          Accuracy=as.double(confusionMatrix(y_hat_knn,
+                                                  test_set$spam)$overall["Accuracy"])))
+specificity_df
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(y_hat_knn, test_set$spam)$table
+specificity_df[1:4,]
+```
+
+Let's take a look at the important fields used in this model:
+```{r message=FALSE, warning=FALSE}
+varImp(train_knn)$importance %>% 
+   as.data.frame() %>%
+   rownames_to_column() %>%
+   arrange(desc(Spam)) %>% slice(1:5)
+```
+
+
+
+### Classification and regression tree (RPART)
+
+For RPART model, There is one tuning parameter, Complexity Parameter cp , it is used to prune trees to the limit the new branch van enhance the metric:
+
+```{r message=FALSE, warning=FALSE}
+modelLookup("rpart")
+```
+
+We will try tuning with cp from 0 to 0.2, and then plot the output and printing the optimum cp
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+grid <- data.frame(cp=seq(0,0.2, length.out = 21))
+
+train_rpart<-train(x,y, method="rpart", metric = "Spec", trControl=control ,
+                   tuneGrid = grid)
+ggplot(train_rpart, highlight = T)
+train_rpart$bestTune
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(train_rpart, highlight = T)
+as.double(train_rpart$bestTune)
+```
+
+let's take a look at the optimum model:
+```{r message=FALSE, warning=FALSE}
+plot(train_rpart$finalModel,margin = 0.1)
+text(train_rpart$finalModel, cex=0.75)
+```
+
+
+and for the performance on the test set:
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+y_hat_rpart<-predict(train_rpart, newdata = test_set)
+confusionMatrix(y_hat_rpart, test_set$spam)$table
+
+specificity_df<-rbind(specificity_df,
+                      data.frame(method="rpart", 
+                                 Spec=specificity(y_hat_rpart, test_set$spam),
+                                         Accuracy=as.double(confusionMatrix(y_hat_rpart,
+                                                    test_set$spam)$overall["Accuracy"])))
+specificity_df
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(y_hat_rpart, test_set$spam)$table
+specificity_df[1:5,]
+```
+
+Let's take a look at the important fields used in this model:
+```{r message=FALSE, warning=FALSE}
+varImp(train_rpart)$importance %>% 
+   as.data.frame() %>%
+   rownames_to_column() %>%
+   arrange(desc(Overall)) %>% slice(1:5)
+```
+
+
+
+### Random Forest (RF)
+
+For RF model, There is one tuning parameter, mtry , it the number of the fields used in every tree:
+
+```{r message=FALSE, warning=FALSE}
+modelLookup("rf")
+```
+
+We will try tuning with mtry with these numbers (3, 5, 7, 9), and then plot the output and printing the optimum mtry
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+train_rf<-train(x,y, method="rf", metric = "Spec", trControl=control ,
+                tuneGrid = data.frame(mtry=c(3, 5, 7, 9)))
+ggplot(train_rf, highlight = T)
+train_rf$bestTune
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(train_rf, highlight = T)
+as.integer(train_rf$bestTune)
+```
+
+
+and for the performance on the test set:
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+y_hat_rf<-predict(train_rf, newdata = test_set)
+confusionMatrix(y_hat_rf, test_set$spam)$table
+
+specificity_df<-rbind(specificity_df,
+                      data.frame(method="rf", 
+                                 Spec=specificity(y_hat_rf, test_set$spam),
+                                         Accuracy=as.double(confusionMatrix(y_hat_rf,
+                                                test_set$spam)$overall["Accuracy"])))
+specificity_df
+
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(y_hat_rf, test_set$spam)$table
+specificity_df[1:6,]
+```
+
+Let's take a look at the important fields used in this model:
+```{r message=FALSE, warning=FALSE}
+varImp(train_rf)$importance %>% 
+   as.data.frame() %>%
+   rownames_to_column() %>%
+   arrange(desc(Overall)) %>% slice(1:5)
+```
+
+
+
+### Classification with a bagging (TREEBAG)
+
+
+For TREEBAG model, There is no tuning parameters:
+
+```{r message=FALSE, warning=FALSE}
+modelLookup("treebag")
+```
+
+Here is the training and testing code:
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+train_treebag<-train(x,y, method="treebag",  metric = "Spec", trControl=control )
+
+y_hat_treebag<-predict(train_treebag, newdata = test_set)
+confusionMatrix(y_hat_treebag, test_set$spam)$table
+
+specificity_df<-rbind(specificity_df,
+                      data.frame(method="treebag", 
+                                 Spec=specificity(y_hat_treebag, test_set$spam),
+                                      Accuracy=as.double(confusionMatrix(y_hat_treebag,
+                                                    test_set$spam)$overall["Accuracy"])))
+specificity_df
+
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(y_hat_treebag, test_set$spam)$table
+specificity_df[1:7,]
+```
+
+Let's take a look at the important fields used in this model:
+```{r message=FALSE, warning=FALSE}
+varImp(train_treebag)$importance %>% 
+   as.data.frame() %>%
+   rownames_to_column() %>%
+   arrange(desc(Overall)) %>% slice(1:5)
+```
+
+
+
+### Ensemble
+
+Till now, we have tested 7 different models, with ensembling their output, we will take votes for every email (row) if it is Spam or Not, and deciding upon that vote:
+
+```{r message=FALSE, warning=FALSE, eval=FALSE}
+ensemble<-data.frame(y_hat_glm,y_hat_naive_bayes,y_hat_lda,
+                     y_hat_knn,y_hat_rpart,y_hat_rf,y_hat_treebag)
+y_hat_ensemble <-apply(ensemble,1 , function(x) 
+  ifelse(mean(x=="Spam")>0.5,"Spam","Not Spam"))
+y_hat_ensemble<-factor(y_hat_ensemble, levels = c("Spam","Not Spam"))
+
+```
+
+and here is the performace of the Ensemble:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+confusionMatrix(y_hat_ensemble, test_set$spam)$table
+
+specificity_df<-rbind(specificity_df,
+                      data.frame(method="ensemble",
+                                 Spec=specificity(y_hat_ensemble, test_set$spam),
+                                 Accuracy=as.double(confusionMatrix(y_hat_ensemble,
+                                          test_set$spam)$overall["Accuracy"])))
+specificity_df
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+confusionMatrix(y_hat_ensemble, test_set$spam)$table
+specificity_df
+```
+
+## Result
+
+From the models above, The Random Forest resulted the best performace, and the Important variables across most of the models are:
+
+  + char_freq_! 
+  + char_freq_$
+  + word_freq_remove
+  + word_freq_free 
+  + word_freq_your
+  + capital_run_length_averag
+  + capital_run_length_longest
+
+The Special characters (! & $) has the most effect
+
+That result is based on the Specificity & Accuracy
+
+
+## Conclusion
+
+There is more than 250 Billion sent every day, with spam rate averaged at 14.30% worldwide,
+A small decision tree, or a simple glm model on a small number of variables can increase the performance of the email servers, while producing an OK result
+
+The models presented here can be personalized, we saw a variable named "word_freq_george", something like that can be personalized for every receiver, ex: "word_freq_nady"
+
+The limitations in this analysis is that we only have `r nrow(emails)` emails to work with, we would need larger data, to produce meaningful results, and we can also create different variables, if we have access to the emails themselves,
+but of course there is privacy issue in this regard.
